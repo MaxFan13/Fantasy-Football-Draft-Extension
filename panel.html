@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sleeper Draft Assistant</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <header>
+    <div class="title-row">
+      <h1>Draft Assistant</h1>
+      <button id="settingsBtn" class="icon-btn" title="Rankings settings">&#9881;</button>
+    </div>
+    <div id="draftStatus" class="draft-status">
+      <span class="dot off" id="statusDot"></span>
+      <span id="statusText">Not connected to a draft</span>
+      <button id="connectBtn" class="mini-btn">Connect</button>
+    </div>
+  </header>
+
+  <section id="settingsPanel" class="settings hidden">
+    <h2>Rankings</h2>
+    <p class="hint">
+      Pulls the latest
+      <a href="https://www.fantasypros.com/nfl/rankings/consensus-cheatsheets.php" target="_blank" rel="noopener">FantasyPros consensus rankings</a>.
+      Pick your league's scoring format first.
+    </p>
+    <div class="row">
+      <select id="scoringSelect">
+        <option value="half">Half PPR</option>
+        <option value="ppr">PPR</option>
+        <option value="std">Standard</option>
+      </select>
+      <button id="fetchRankings" class="mini-btn">Fetch rankings</button>
+    </div>
+    <details class="csv-fallback">
+      <summary>Or upload the FantasyPros CSV instead</summary>
+      <input type="file" id="csvFile" accept=".csv,.txt" />
+    </details>
+    <div id="rankingsInfo" class="rankings-info"></div>
+    <button id="clearRankings" class="mini-btn danger hidden">Clear rankings</button>
+
+    <h2>Draft</h2>
+    <p class="hint">
+      Open your Sleeper draft room in a tab and click Connect, or paste the draft URL / ID below.
+    </p>
+    <div class="row">
+      <input type="text" id="draftInput" placeholder="https://sleeper.com/draft/nfl/… or draft ID" />
+      <button id="draftInputBtn" class="mini-btn">Use</button>
+    </div>
+  </section>
+
+  <section id="bestGrid" class="best-grid hidden"></section>
+
+  <nav id="posTabs" class="pos-tabs hidden">
+    <button data-pos="ALL" class="active">All</button>
+    <button data-pos="QB">QB</button>
+    <button data-pos="RB">RB</button>
+    <button data-pos="WR">WR</button>
+    <button data-pos="TE">TE</button>
+    <button data-pos="FLEX">FLX</button>
+    <button data-pos="K">K</button>
+    <button data-pos="DST">DST</button>
+  </nav>
+
+  <div id="listControls" class="list-controls hidden">
+    <input type="search" id="searchBox" placeholder="Search players…" />
+    <label class="toggle">
+      <input type="checkbox" id="hideDrafted" checked />
+      <span>Hide drafted</span>
+    </label>
+  </div>
+
+  <main id="playerList" class="player-list">
+    <div class="empty-state" id="emptyState">
+      <p><strong>No rankings loaded yet.</strong></p>
+      <p>Pick your scoring format above and hit <em>Fetch rankings</em> to get started.</p>
+    </div>
+  </main>
+
+  <script src="panel.js"></script>
+</body>
+</html>

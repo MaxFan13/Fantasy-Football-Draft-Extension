@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Sleeper Draft Assistant",
+  "version": "1.0.0",
+  "description": "Shows the best available players by position during your Sleeper draft, using FantasyPros consensus rankings.",
+  "permissions": ["storage", "sidePanel", "tabs"],
+  "host_permissions": [
+    "https://api.sleeper.app/*",
+    "https://www.fantasypros.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://sleeper.com/draft/*", "https://*.sleeper.com/draft/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://sleeper.com/draft/*", "https://*.sleeper.com/draft/*"],
+      "js": ["relay.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "action": {
+    "default_title": "Open Draft Assistant"
+  }
+}
