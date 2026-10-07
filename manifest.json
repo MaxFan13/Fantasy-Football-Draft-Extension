@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Sleeper Draft Assistant",
   "version": "1.0.0",
-  "description": "Shows the best available players by position during your Sleeper draft, using FantasyPros consensus rankings.",
+  "description": "Shows the best available players by position during your Sleeper NFL or NBA draft, using FantasyPros consensus rankings.",
   "permissions": ["storage", "sidePanel", "tabs"],
   "host_permissions": [
     "https://api.sleeper.app/*",

@@ -110,6 +110,7 @@ select {
   flex: 1;
 }
 select:focus { outline: none; border-color: var(--accent); }
+#sportSelect { flex: 0 0 auto; }
 
 .csv-fallback { margin-top: 8px; }
 .csv-fallback summary {
