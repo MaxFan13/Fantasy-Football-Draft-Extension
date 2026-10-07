@@ -30,8 +30,9 @@ Drafted players are crossed off your board automatically in real time — no cli
    - The top grid always shows the **best available player at each position**
    - The list below shows full rankings with FantasyPros tiers (NFL only —
      FantasyPros doesn't publish NBA tiers in its data feed); use the
-     position tabs (NFL: QB/RB/WR/TE/FLX/K/DST; NBA: G/F/C, with each
-     player's finer eligibility like `PG,SG` shown in the row) and search box
+     position tabs (NFL: QB/RB/WR/TE/FLX/K/DST; NBA: PG/SG/SF/PF/C — a
+     multi-eligible player appears under every position Sleeper grants
+     them, shown in the row like `PG/SG`) and search box
    - Drafted players disappear (or show struck-through if you uncheck
      *Hide drafted*)
 
@@ -55,8 +56,15 @@ consensus. Rankings and your draft connection are remembered between sessions.
   "Jokić" / "Dončić" / "Şengün" match FantasyPros' "Jokic" / "Doncic" /
   "Sengun" — plus punctuation and Jr./III-style suffixes stripped) and
   matched by name + position, with a name-only fallback. Sleeper `DEF` picks
-  map to FantasyPros `DST` rows; NBA `PG/SG/SF/PF` fold to FantasyPros'
-  `G/F/C` buckets.
+  map to FantasyPros `DST` rows.
+- **NBA positions come from Sleeper, not FantasyPros**: FantasyPros ranks NBA
+  players as loose G/F/C buckets that often disagree with the PG/SG/SF/PF/C
+  eligibility Sleeper enforces in the draft room. When NBA rankings are
+  fetched, the panel also pulls Sleeper's player database
+  (`api.sleeper.app/v1/players/nba`, cached for 24h) and overwrites every
+  player's position and eligibility with Sleeper's. The *rank order* is still
+  FantasyPros'. This also gives each player a Sleeper `player_id`, so drafted
+  picks are matched exactly by id before falling back to name matching.
 
 ## Files
 

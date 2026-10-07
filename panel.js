@@ -12,9 +12,11 @@ const POLL_MS = 3000;
 //
 // Everything sport-specific lives here: FantasyPros URLs, how raw position
 // strings collapse into the buckets we show, and which tabs / grid cells exist.
-// FantasyPros NBA ranks players as G / F / C (with finer eligibility in
-// `player_positions`), while Sleeper reports PG / SG / SF / PF / C, so the NBA
-// mapper folds both down to the same three buckets.
+// FantasyPros NBA ranks players as G / F / C, which often disagrees with the
+// PG / SG / SF / PF / C eligibility Sleeper actually enforces in the draft
+// room. With `useSleeperPositions` set, every ranked player's position and
+// eligibility are overwritten from Sleeper's own player database, and FP's
+// bucket is only a fallback for players Sleeper doesn't know about.
 const SPORTS = {
   nfl: {
     label: "NFL",
@@ -53,15 +55,16 @@ const SPORTS = {
       yahoo: "Points (Yahoo)",
       cbs: "Points (CBS)",
     },
-    tabs: [["ALL", "All"], ["G", "G"], ["F", "F"], ["C", "C"]],
+    tabs: [
+      ["ALL", "All"], ["PG", "PG"], ["SG", "SG"], ["SF", "SF"], ["PF", "PF"], ["C", "C"],
+    ],
     groups: {},
-    bestGrid: ["G", "F", "C"],
+    // UTIL = best available at any position
+    bestGrid: ["PG", "SG", "SF", "PF", "C", "UTIL"],
+    useSleeperPositions: true,
     normalizePos(pos) {
-      // "PG,SG" / "PF" / "G1" -> first listed position, folded to G / F / C
-      const p = (pos || "").toUpperCase().replace(/[0-9]/g, "").split(/[,/\s]+/)[0] || "";
-      if (p === "PG" || p === "SG" || p === "G") return "G";
-      if (p === "SF" || p === "PF" || p === "F") return "F";
-      return p;
+      // "PG,SG" / "PF" / "G1" -> first listed position, digits stripped
+      return (pos || "").toUpperCase().replace(/[0-9]/g, "").split(/[,/\s]+/)[0] || "";
     },
   },
 };
@@ -71,11 +74,13 @@ function cfg() {
   return SPORTS[sport];
 }
 
-let players = [];           // [{rank, tier, name, team, pos, posRank, bye, eligible, key, nameKey}]
+let players = [];           // [{rank, tier, name, team, pos, positions, sleeperId, posRank, bye, key, nameKey}]
+let draftedIds = new Set();  // Sleeper player_ids of drafted players (exact, when rankings carry sleeperId)
 let draftedKeys = new Set(); // normalized keys of drafted players (from REST polling)
 let draftedNameKeys = new Set();
 let wsDraftedKeys = new Set();     // instant picks seen on the draft room's live
 let wsDraftedNameKeys = new Set(); // WebSocket feed, ahead of the REST API
+let wsDraftedIds = new Set();
 let draftId = null;
 let pollTimer = null;
 let activePos = "ALL";
@@ -264,6 +269,78 @@ async function fetchFromFantasyPros(scoring) {
   };
 }
 
+// ---------- Sleeper player database (positions + ids) ----------
+
+const SLEEPER_PLAYERS_TTL_MS = 24 * 60 * 60 * 1000; // Sleeper asks for at most one pull a day
+
+// Returns Map<nameKey, {id, pos, positions, team}> for the current sport,
+// cached in storage for a day. Only the compact name->positions map is kept,
+// not the multi-MB raw dump.
+async function loadSleeperPlayers() {
+  const storageKey = `sleeperPlayers_${sport}`;
+  const stored = await chrome.storage.local.get([storageKey]);
+  const cached = stored[storageKey];
+  if (cached && Date.now() - cached.ts < SLEEPER_PLAYERS_TTL_MS) {
+    return new Map(Object.entries(cached.map));
+  }
+
+  const res = await fetch(`https://api.sleeper.app/v1/players/${sport}`);
+  if (!res.ok) throw new Error(`Sleeper players API error (${res.status})`);
+  const raw = await res.json();
+
+  const map = {};
+  for (const [id, p] of Object.entries(raw)) {
+    if (!p || !p.first_name || !p.last_name || !p.position || p.position === "DEF") continue;
+    const nameKey = normalizeName(`${p.first_name} ${p.last_name}`);
+    const entry = {
+      id,
+      pos: p.position,
+      positions: Array.isArray(p.fantasy_positions) && p.fantasy_positions.length
+        ? p.fantasy_positions.slice()
+        : [p.position],
+      team: p.team || "",
+    };
+    // Two Sleeper players can share a name; prefer the one on an active roster
+    const prev = map[nameKey];
+    if (!prev || (!prev.team && entry.team)) map[nameKey] = entry;
+  }
+  await chrome.storage.local.set({ [storageKey]: { ts: Date.now(), map } });
+  return new Map(Object.entries(map));
+}
+
+// Overwrite FantasyPros positions with Sleeper's. Players Sleeper doesn't know
+// keep FP's bucket and show up only under All.
+function applySleeperPositions(parsed, sleeperMap) {
+  let matched = 0;
+  for (const p of parsed) {
+    const sp = sleeperMap.get(p.nameKey);
+    if (!sp) {
+      p.positions = [p.pos];
+      continue;
+    }
+    matched++;
+    p.pos = sp.pos;
+    p.positions = sp.positions;
+    p.sleeperId = sp.id;
+    p.posRank = null; // FP's G2 / F7 no longer means anything
+    p.eligible = "";
+    p.key = playerKey(p.name, p.pos);
+  }
+  return matched;
+}
+
+// Fetch rankings for the current sport and, where configured, re-key them to
+// Sleeper's positions in the same step so the board never shows FP's buckets.
+async function loadRankings(scoring) {
+  const result = await fetchFromFantasyPros(scoring);
+  if (cfg().useSleeperPositions) {
+    const sleeperMap = await loadSleeperPlayers();
+    const matched = applySleeperPositions(result.parsed, sleeperMap);
+    result.meta += ` · Sleeper positions (${matched}/${result.parsed.length})`;
+  }
+  return result;
+}
+
 // ---------- Sleeper draft polling ----------
 
 function extractDraftId(str) {
@@ -294,14 +371,16 @@ async function fetchPicks() {
 
   const keys = new Set();
   const nameKeys = new Set();
+  const ids = new Set();
   for (const pick of picks || []) {
+    if (pick.player_id) ids.add(String(pick.player_id));
     const m = pick.metadata || {};
     const name = `${m.first_name || ""} ${m.last_name || ""}`.trim();
     if (!name) continue;
     keys.add(playerKey(name, m.position));
     nameKeys.add(normalizeName(name));
   }
-  return { keys, nameKeys, count: (picks || []).length };
+  return { keys, nameKeys, ids, count: (picks || []).length };
 }
 
 // ---------- live WebSocket feed (relayed from the Sleeper draft tab) ----------
@@ -342,6 +421,7 @@ function handleWsFrame(text) {
     if (!wsDraftedKeys.has(key)) {
       wsDraftedKeys.add(key);
       wsDraftedNameKeys.add(normalizeName(name));
+      if (m.player_id) wsDraftedIds.add(String(m.player_id));
       changed = true;
     }
   }
@@ -369,9 +449,10 @@ function setStatus(state, text) {
 
 async function pollOnce() {
   try {
-    const { keys, nameKeys, count } = await fetchPicks();
+    const { keys, nameKeys, ids, count } = await fetchPicks();
     draftedKeys = keys;
     draftedNameKeys = nameKeys;
+    draftedIds = ids;
     setStatus("on", `Connected · ${count} pick${count === 1 ? "" : "s"} made`);
     render();
   } catch (err) {
@@ -383,6 +464,7 @@ function startPolling(id) {
   if (id !== draftId) {
     wsDraftedKeys = new Set();
     wsDraftedNameKeys = new Set();
+    wsDraftedIds = new Set();
   }
   draftId = id;
   if (pollTimer) clearInterval(pollTimer);
@@ -398,8 +480,10 @@ function stopPolling() {
   draftId = null;
   draftedKeys = new Set();
   draftedNameKeys = new Set();
+  draftedIds = new Set();
   wsDraftedKeys = new Set();
   wsDraftedNameKeys = new Set();
+  wsDraftedIds = new Set();
   setStatus("off", "Not connected to a draft");
   chrome.storage.local.remove("draftId");
   render();
@@ -429,8 +513,13 @@ async function connectFromActiveTab() {
 
 // ---------- rendering ----------
 
+function positionsOf(p) {
+  return p.positions && p.positions.length ? p.positions : [p.pos];
+}
+
 function isDrafted(p) {
   return (
+    (p.sleeperId && (draftedIds.has(p.sleeperId) || wsDraftedIds.has(p.sleeperId))) ||
     draftedKeys.has(p.key) ||
     draftedNameKeys.has(p.nameKey) ||
     wsDraftedKeys.has(p.key) ||
@@ -442,12 +531,14 @@ function matchesTab(p) {
   if (activePos === "ALL") return true;
   const group = cfg().groups[activePos];
   if (group) return group.has(p.pos);
-  return p.pos === activePos;
+  return positionsOf(p).includes(activePos);
 }
 
 function playerMeta(p) {
   const bits = [p.team];
-  if (p.eligible) bits.push(p.eligible);
+  const eligible = positionsOf(p);
+  if (eligible.length > 1) bits.push(eligible.join("/"));
+  else if (p.eligible) bits.push(p.eligible);
   if (p.bye) bits.push("Bye " + p.bye);
   return bits.filter(Boolean).join(" · ");
 }
@@ -466,7 +557,9 @@ function renderBestGrid() {
   grid.classList.remove("hidden");
   grid.innerHTML = "";
   for (const pos of cfg().bestGrid) {
-    const best = players.find((p) => p.pos === pos && !isDrafted(p));
+    const best = players.find(
+      (p) => (pos === "UTIL" || positionsOf(p).includes(pos)) && !isDrafted(p)
+    );
     const cell = document.createElement("div");
     cell.className = "best-cell";
     cell.title = "Show " + pos + " rankings";
@@ -637,7 +730,7 @@ async function init() {
     const scoring = document.getElementById("scoringSelect").value;
     showRankingsInfo("Fetching rankings…");
     try {
-      const { parsed, meta } = await fetchFromFantasyPros(scoring);
+      const { parsed, meta } = await loadRankings(scoring);
       await chrome.storage.local.set({ rankings: parsed, rankingsMeta: meta, scoring, sport });
       applyRankings(parsed, meta);
     } catch (err) {
@@ -651,7 +744,11 @@ async function init() {
     try {
       const text = await file.text();
       const parsed = parseRankingsCsv(text);
-      const meta = `${cfg().label} · CSV ${new Date().toLocaleDateString()}`;
+      let meta = `${cfg().label} · CSV ${new Date().toLocaleDateString()}`;
+      if (cfg().useSleeperPositions) {
+        const matched = applySleeperPositions(parsed, await loadSleeperPlayers());
+        meta += ` · Sleeper positions (${matched}/${parsed.length})`;
+      }
       await chrome.storage.local.set({ rankings: parsed, rankingsMeta: meta, sport });
       applyRankings(parsed, meta);
     } catch (err) {
