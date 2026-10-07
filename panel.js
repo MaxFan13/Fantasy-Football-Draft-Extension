@@ -7,10 +7,71 @@
  */
 
 const POLL_MS = 3000;
-const FLEX_POSITIONS = new Set(["RB", "WR", "TE"]);
-const BEST_GRID_POSITIONS = ["QB", "RB", "WR", "TE", "K", "DST"];
 
-let players = [];           // [{rank, tier, name, team, pos, posRank, bye, key, nameKey}]
+// ---------- sport configuration ----------
+//
+// Everything sport-specific lives here: FantasyPros URLs, how raw position
+// strings collapse into the buckets we show, and which tabs / grid cells exist.
+// FantasyPros NBA ranks players as G / F / C (with finer eligibility in
+// `player_positions`), while Sleeper reports PG / SG / SF / PF / C, so the NBA
+// mapper folds both down to the same three buckets.
+const SPORTS = {
+  nfl: {
+    label: "NFL",
+    fpBase: "https://www.fantasypros.com/nfl/rankings/",
+    fpUrls: {
+      half: "half-point-ppr-cheatsheets.php",
+      ppr: "ppr-cheatsheets.php",
+      std: "consensus-cheatsheets.php",
+    },
+    scoringLabels: { half: "Half PPR", ppr: "PPR", std: "Standard" },
+    tabs: [
+      ["ALL", "All"], ["QB", "QB"], ["RB", "RB"], ["WR", "WR"],
+      ["TE", "TE"], ["FLEX", "FLX"], ["K", "K"], ["DST", "DST"],
+    ],
+    groups: { FLEX: new Set(["RB", "WR", "TE"]) },
+    bestGrid: ["QB", "RB", "WR", "TE", "K", "DST"],
+    normalizePos(pos) {
+      const p = (pos || "").toUpperCase().replace(/[0-9]/g, "").trim();
+      if (p === "DEF" || p === "D/ST" || p === "DS") return "DST";
+      if (p === "PK") return "K";
+      return p;
+    },
+  },
+  nba: {
+    label: "NBA",
+    fpBase: "https://www.fantasypros.com/nba/rankings/",
+    fpUrls: {
+      roto: "overall.php",
+      espn: "overall-points-espn.php",
+      yahoo: "overall-points-yahoo.php",
+      cbs: "overall-points-cbs.php",
+    },
+    scoringLabels: {
+      roto: "Roto / Categories",
+      espn: "Points (ESPN)",
+      yahoo: "Points (Yahoo)",
+      cbs: "Points (CBS)",
+    },
+    tabs: [["ALL", "All"], ["G", "G"], ["F", "F"], ["C", "C"]],
+    groups: {},
+    bestGrid: ["G", "F", "C"],
+    normalizePos(pos) {
+      // "PG,SG" / "PF" / "G1" -> first listed position, folded to G / F / C
+      const p = (pos || "").toUpperCase().replace(/[0-9]/g, "").split(/[,/\s]+/)[0] || "";
+      if (p === "PG" || p === "SG" || p === "G") return "G";
+      if (p === "SF" || p === "PF" || p === "F") return "F";
+      return p;
+    },
+  },
+};
+
+let sport = "nfl";
+function cfg() {
+  return SPORTS[sport];
+}
+
+let players = [];           // [{rank, tier, name, team, pos, posRank, bye, eligible, key, nameKey}]
 let draftedKeys = new Set(); // normalized keys of drafted players (from REST polling)
 let draftedNameKeys = new Set();
 let wsDraftedKeys = new Set();     // instant picks seen on the draft room's live
@@ -25,9 +86,22 @@ let hideDrafted = true;
 
 const SUFFIXES = new Set(["jr", "sr", "ii", "iii", "iv", "v"]);
 
+// Letters that don't decompose into base + accent under NFD, so the
+// combining-mark strip below would otherwise leave them intact.
+const SPECIAL_LETTERS = { đ: "d", ð: "d", ø: "o", ł: "l", ß: "ss", æ: "ae", œ: "oe", þ: "th" };
+
+// Sleeper spells names with diacritics ("Nikola Jokić", "Luka Dončić",
+// "Alperen Şengün") while FantasyPros uses plain ASCII ("Jokic", "Sengun").
+// Fold both to the same accent-free form before comparing.
+function stripDiacritics(s) {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[đðøłßæœþ]/g, (c) => SPECIAL_LETTERS[c] || c);
+}
+
 function normalizeName(name) {
-  const words = name
-    .toLowerCase()
+  const words = stripDiacritics(String(name).toLowerCase())
     .replace(/[.,'’\-]/g, " ")
     .split(/\s+/)
     .filter((w) => w && !SUFFIXES.has(w));
@@ -35,10 +109,7 @@ function normalizeName(name) {
 }
 
 function normalizePos(pos) {
-  const p = (pos || "").toUpperCase().replace(/[0-9]/g, "").trim();
-  if (p === "DEF" || p === "D/ST" || p === "DS") return "DST";
-  if (p === "PK") return "K";
-  return p;
+  return cfg().normalizePos(pos);
 }
 
 function playerKey(name, pos) {
@@ -122,6 +193,7 @@ function parseRankingsCsv(text) {
       pos,
       posRank: posRankMatch ? parseInt(posRankMatch[0], 10) : null,
       bye: col.bye !== -1 ? (r[col.bye] || "").trim() : "",
+      eligible: rawPos.includes(",") ? rawPos.replace(/\s+/g, "") : "",
       key: playerKey(name, pos),
       nameKey: normalizeName(name),
     });
@@ -132,13 +204,6 @@ function parseRankingsCsv(text) {
 }
 
 // ---------- FantasyPros direct fetch ----------
-
-const FP_URLS = {
-  std: "https://www.fantasypros.com/nfl/rankings/consensus-cheatsheets.php",
-  half: "https://www.fantasypros.com/nfl/rankings/half-point-ppr-cheatsheets.php",
-  ppr: "https://www.fantasypros.com/nfl/rankings/ppr-cheatsheets.php",
-};
-const SCORING_LABELS = { std: "Standard", half: "Half PPR", ppr: "PPR" };
 
 // Extract the JSON object assigned to `ecrData` in the page source.
 // Brace-counts (string-aware) instead of regex so embedded braces don't break it.
@@ -166,7 +231,8 @@ function extractEcrJson(html) {
 }
 
 async function fetchFromFantasyPros(scoring) {
-  const res = await fetch(FP_URLS[scoring], { credentials: "omit" });
+  const c = cfg();
+  const res = await fetch(c.fpBase + c.fpUrls[scoring], { credentials: "omit" });
   if (!res.ok) throw new Error(`FantasyPros returned ${res.status}`);
   const html = await res.text();
   const data = extractEcrJson(html);
@@ -176,20 +242,26 @@ async function fetchFromFantasyPros(scoring) {
   const parsed = raw.map((p) => {
     const pos = normalizePos(p.player_position_id);
     const posRankMatch = String(p.pos_rank || "").match(/\d+/);
+    // NBA rows carry finer eligibility ("PG,SG") than the G/F/C bucket
+    const eligible = String(p.player_positions || "");
     return {
-      rank: p.rank_ecr,
+      rank: parseInt(p.rank_ecr, 10),
       tier: p.tier || null,
       name: p.player_name,
       team: p.player_team_id || "",
       pos,
       posRank: posRankMatch ? parseInt(posRankMatch[0], 10) : null,
       bye: p.player_bye_week || "",
+      eligible: eligible.includes(",") ? eligible : "",
       key: playerKey(p.player_name, pos),
       nameKey: normalizeName(p.player_name),
     };
   });
   parsed.sort((a, b) => a.rank - b.rank);
-  return { parsed, meta: `${SCORING_LABELS[scoring]} · updated ${data.last_updated || "today"}` };
+  return {
+    parsed,
+    meta: `${c.label} · ${c.scoringLabels[scoring]} · updated ${data.last_updated || "today"}`,
+  };
 }
 
 // ---------- Sleeper draft polling ----------
@@ -200,6 +272,14 @@ function extractDraftId(str) {
   if (urlMatch) return urlMatch[1];
   const idMatch = str.trim().match(/^(\d{6,})$/);
   return idMatch ? idMatch[1] : null;
+}
+
+// Sleeper draft URLs are /draft/<sport>/<id>; use that to flag a sport mismatch
+// with the loaded rankings (e.g. NBA draft open, NFL board loaded).
+function extractDraftSport(str) {
+  const m = (str || "").match(/draft\/([a-z]+)\/\d{6,}/i);
+  const s = m ? m[1].toLowerCase() : null;
+  return s && SPORTS[s] ? s : null;
 }
 
 async function fetchPicks() {
@@ -331,6 +411,14 @@ async function connectFromActiveTab() {
     const id = extractDraftId(tab && tab.url);
     if (id) {
       startPolling(id);
+      const draftSport = extractDraftSport(tab.url);
+      if (draftSport && draftSport !== sport && players.length) {
+        showRankingsInfo(
+          `This is an ${SPORTS[draftSport].label} draft but ${cfg().label} rankings are loaded — switch sport and re-fetch.`,
+          true
+        );
+        document.getElementById("settingsPanel").classList.remove("hidden");
+      }
       return true;
     }
   } catch (e) {
@@ -352,8 +440,16 @@ function isDrafted(p) {
 
 function matchesTab(p) {
   if (activePos === "ALL") return true;
-  if (activePos === "FLEX") return FLEX_POSITIONS.has(p.pos);
+  const group = cfg().groups[activePos];
+  if (group) return group.has(p.pos);
   return p.pos === activePos;
+}
+
+function playerMeta(p) {
+  const bits = [p.team];
+  if (p.eligible) bits.push(p.eligible);
+  if (p.bye) bits.push("Bye " + p.bye);
+  return bits.filter(Boolean).join(" · ");
 }
 
 function render() {
@@ -369,14 +465,12 @@ function renderBestGrid() {
   }
   grid.classList.remove("hidden");
   grid.innerHTML = "";
-  for (const pos of BEST_GRID_POSITIONS) {
+  for (const pos of cfg().bestGrid) {
     const best = players.find((p) => p.pos === pos && !isDrafted(p));
     const cell = document.createElement("div");
     cell.className = "best-cell";
     cell.title = "Show " + pos + " rankings";
-    const meta = best
-      ? `#${best.rank} · ${best.team}${best.bye ? " · Bye " + best.bye : ""}`
-      : "—";
+    const meta = best ? `#${best.rank} · ${playerMeta(best)}` : "—";
     cell.innerHTML = `
       <div class="pos">${pos}</div>
       <div class="name">${best ? escapeHtml(best.name) : "None left"}</div>
@@ -425,7 +519,7 @@ function renderList() {
       <div class="p-rank">${p.rank}</div>
       <div class="p-main">
         <div class="p-name">${escapeHtml(p.name)}</div>
-        <div class="p-meta">${escapeHtml(p.team)}${p.bye ? " · Bye " + escapeHtml(p.bye) : ""}</div>
+        <div class="p-meta">${escapeHtml(playerMeta(p))}</div>
       </div>
       <div class="p-pos">${p.pos}${p.posRank || ""}</div>`;
     frag.appendChild(row);
@@ -457,6 +551,39 @@ function showRankingsInfo(text, isError = false) {
   el.className = "rankings-info" + (isError ? " error" : "");
 }
 
+// Rebuild the sport-dependent bits of the settings panel and tab bar.
+function applySportUi() {
+  const c = cfg();
+  const scoringSel = document.getElementById("scoringSelect");
+  const prev = scoringSel.value;
+  scoringSel.innerHTML = "";
+  for (const [value, label] of Object.entries(c.scoringLabels)) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    scoringSel.appendChild(opt);
+  }
+  if (c.scoringLabels[prev]) scoringSel.value = prev;
+
+  const link = document.getElementById("fpLink");
+  link.href = c.fpBase + Object.values(c.fpUrls)[0];
+  link.textContent = `FantasyPros ${c.label} consensus rankings`;
+  document.getElementById("draftInput").placeholder =
+    `https://sleeper.com/draft/${sport}/… or draft ID`;
+
+  const tabs = document.getElementById("posTabs");
+  tabs.innerHTML = "";
+  for (const [pos, label] of c.tabs) {
+    const btn = document.createElement("button");
+    btn.dataset.pos = pos;
+    btn.textContent = label;
+    btn.addEventListener("click", () => setActiveTab(pos));
+    tabs.appendChild(btn);
+  }
+  if (!c.tabs.some(([pos]) => pos === activePos)) activePos = "ALL";
+  setActiveTab(activePos);
+}
+
 function applyRankings(parsed, meta) {
   players = parsed;
   document.getElementById("posTabs").classList.remove("hidden");
@@ -467,9 +594,16 @@ function applyRankings(parsed, meta) {
 }
 
 async function init() {
-  const stored = await chrome.storage.local.get(["rankings", "rankingsMeta", "draftId", "scoring"]);
+  const stored = await chrome.storage.local.get([
+    "rankings", "rankingsMeta", "draftId", "scoring", "sport",
+  ]);
 
-  if (stored.scoring) document.getElementById("scoringSelect").value = stored.scoring;
+  if (stored.sport && SPORTS[stored.sport]) sport = stored.sport;
+  document.getElementById("sportSelect").value = sport;
+  applySportUi();
+  if (stored.scoring && cfg().scoringLabels[stored.scoring]) {
+    document.getElementById("scoringSelect").value = stored.scoring;
+  }
   if (stored.rankings && stored.rankings.length) {
     applyRankings(stored.rankings, stored.rankingsMeta);
   } else {
@@ -486,12 +620,25 @@ async function init() {
     document.getElementById("settingsPanel").classList.toggle("hidden");
   });
 
+  document.getElementById("sportSelect").addEventListener("change", async (e) => {
+    sport = e.target.value;
+    applySportUi();
+    // Rankings on disk belong to the previous sport — drop them so the board
+    // can't silently show NFL players during an NBA draft.
+    await chrome.storage.local.set({ sport });
+    await chrome.storage.local.remove(["rankings", "rankingsMeta"]);
+    players = [];
+    document.getElementById("clearRankings").classList.add("hidden");
+    showRankingsInfo(`Switched to ${cfg().label} — fetch rankings to load the board.`);
+    render();
+  });
+
   document.getElementById("fetchRankings").addEventListener("click", async () => {
     const scoring = document.getElementById("scoringSelect").value;
     showRankingsInfo("Fetching rankings…");
     try {
       const { parsed, meta } = await fetchFromFantasyPros(scoring);
-      await chrome.storage.local.set({ rankings: parsed, rankingsMeta: meta, scoring });
+      await chrome.storage.local.set({ rankings: parsed, rankingsMeta: meta, scoring, sport });
       applyRankings(parsed, meta);
     } catch (err) {
       showRankingsInfo("Fetch failed: " + err.message + " — try the CSV upload below.", true);
@@ -504,8 +651,8 @@ async function init() {
     try {
       const text = await file.text();
       const parsed = parseRankingsCsv(text);
-      const meta = new Date().toLocaleDateString();
-      await chrome.storage.local.set({ rankings: parsed, rankingsMeta: meta });
+      const meta = `${cfg().label} · CSV ${new Date().toLocaleDateString()}`;
+      await chrome.storage.local.set({ rankings: parsed, rankingsMeta: meta, sport });
       applyRankings(parsed, meta);
     } catch (err) {
       showRankingsInfo(err.message, true);
@@ -543,10 +690,6 @@ async function init() {
     } else {
       setStatus("err", "Couldn't find a draft ID in that text");
     }
-  });
-
-  document.querySelectorAll("#posTabs button").forEach((btn) => {
-    btn.addEventListener("click", () => setActiveTab(btn.dataset.pos));
   });
 
   document.getElementById("searchBox").addEventListener("input", (e) => {

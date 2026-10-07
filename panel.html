@@ -22,15 +22,15 @@
     <h2>Rankings</h2>
     <p class="hint">
       Pulls the latest
-      <a href="https://www.fantasypros.com/nfl/rankings/consensus-cheatsheets.php" target="_blank" rel="noopener">FantasyPros consensus rankings</a>.
-      Pick your league's scoring format first.
+      <a id="fpLink" href="https://www.fantasypros.com/nfl/rankings/consensus-cheatsheets.php" target="_blank" rel="noopener">FantasyPros consensus rankings</a>.
+      Pick your sport and league scoring format first.
     </p>
     <div class="row">
-      <select id="scoringSelect">
-        <option value="half">Half PPR</option>
-        <option value="ppr">PPR</option>
-        <option value="std">Standard</option>
+      <select id="sportSelect">
+        <option value="nfl">NFL</option>
+        <option value="nba">NBA</option>
       </select>
+      <select id="scoringSelect"></select>
       <button id="fetchRankings" class="mini-btn">Fetch rankings</button>
     </div>
     <details class="csv-fallback">
@@ -52,16 +52,8 @@
 
   <section id="bestGrid" class="best-grid hidden"></section>
 
-  <nav id="posTabs" class="pos-tabs hidden">
-    <button data-pos="ALL" class="active">All</button>
-    <button data-pos="QB">QB</button>
-    <button data-pos="RB">RB</button>
-    <button data-pos="WR">WR</button>
-    <button data-pos="TE">TE</button>
-    <button data-pos="FLEX">FLX</button>
-    <button data-pos="K">K</button>
-    <button data-pos="DST">DST</button>
-  </nav>
+  <!-- tabs are built per sport in panel.js -->
+  <nav id="posTabs" class="pos-tabs hidden"></nav>
 
   <div id="listControls" class="list-controls hidden">
     <input type="search" id="searchBox" placeholder="Search players…" />
